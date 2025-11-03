@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Block Blast — Играбельная версия</title>
+  <style>
+    :root{--bg:#0b1220;--card:#0f1724;--accent:#ffd166;--muted:#9aa4b2}
+    html,body{height:100%;margin:0;font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial}
+    body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#06101a 0%, #071625 100%);color:#e6eef6}
+    .wrap{width:min(980px,96vw);display:grid;grid-template-columns:1fr 320px;gap:18px;padding:20px}
+    .game-card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border-radius:12px;padding:12px;box-shadow:0 6px 24px rgba(0,0,0,0.6)}
+    canvas{display:block;background:#061826;border-radius:8px;width:100%;height:640px}
+    .sidebar{background:rgba(255,255,255,0.02);border-radius:12px;padding:16px;min-height:640px}
+    h1{margin:0 0 6px 0;font-size:18px}
+    .meta{color:var(--muted);font-size:13px;margin-bottom:12px}
+    .stat{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+    .stat b{font-size:20px}
+    .controls{font-size:13px;color:var(--muted);line-height:1.6}
+    .buttons{display:flex;gap:8px;margin-top:12px}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);color:inherit;padding:8px 10px;border-radius:8px;cursor:pointer}
+    button.primary{background:var(--accent);color:#0b1220;border:none}
+    .footer{margin-top:16px;color:var(--muted);font-size:12px}
+    .power{padding:6px 8px;border-radius:8px;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));display:inline-block;margin-right:6px}
+    @media (max-width:900px){.wrap{grid-template-columns:1fr;}.sidebar{min-height:auto}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="game-card">
+      <h1>Block Blast</h1>
+      <div class="meta">Убей все блоки — пройди уровень. Передвижение: стрелки влево/вправо или мышь. Пробел — пауза/запуск.</div>
+      <canvas id="gameCanvas" width="800" height="640"></canvas>
+    </div>
+
+    <div class="sidebar">
+      <h1>Статистика</h1>
+      <div class="stat">Очки: <b id="score">0</b></div>
+      <div class="stat">Жизни: <b id="lives">3</b></div>
+      <div class="stat">Уровень: <b id="level">1</b></div>
+      <div class="stat">Блоков: <b id="blocksLeft">0</b></div>
+
+      <h1 style="margin-top:16px">Управление</h1>
+      <div class="controls">
+        ← / → — двигать платформу<br>
+        Мышь — двигать платформу<br>
+        Пробел — начать / пауза<br>
+        T — увеличить скорость мяча (шанс получить в игре)
+      </div>
+
+      <div class="buttons">
+        <button id="btnRestart">Перезапустить</button>
+        <button id="btnNext" class="primary">След. уровень</button>
+      </div>
+
+      <h1 style="margin-top:16px">Активные усиления</h1>
+      <div id="powerList">
+        <span class="power">Нет</span>
+      </div>
+
+      <div class="footer">Сделано: быстрый, отзывчивый HTML + JavaScript. Можем добавить новые механики или графику по запросу.</div>
+    </div>
+  </div>
+
+<script>
+// Block Blast — простой, играбельный Arkanoid-типной блок-бастер
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const levelEl = document.getElementById('level');
+  const blocksLeftEl = document.getElementById('blocksLeft');
+  const powerList = document.getElementById('powerList');
+  const btnRestart = document.getElementById('btnRestart');
+  const btnNext = document.getElementById('btnNext');
+
+  const W = canvas.width, H = canvas.height;
+  let running = false;
+
+  // Game state
+  let score = 0, lives = 3, level = 1;
+
+  // Paddle
+  const paddle = { w:140, h:14, x: (W-140)/2, y: H-44, speed: 8 };
+
+  // Ball
+  let ball = createBall();
+
+  function createBall(){
+    return { x: W/2, y: H-70, r:9, vx: 4*(Math.random()>0.5?1:-1), vy: -4, speedMult:1 };
+  }
+
+  // Blocks
+  const blockConfig = {
+    rows:4, cols:10, w:64, h:22, padding:8, offsetTop:60, offsetLeft:28
+  };
+  let blocks = [];
+
+  // Power-ups falling
+  let powerUps = []; // {x,y,w,h,type,duration}
+  const activePowers = []; // {type,expires}
+
+  // Input
+  const keys = {left:false,right:false};
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width/rect.width);
+    paddle.x = Math.max(8, Math.min(W - paddle.w - 8, mx - paddle.w/2));
+  });
+  window.addEventListener('keydown', e => {
+    if(e.code==='ArrowLeft') keys.left = true;
+    if(e.code==='ArrowRight') keys.right = true;
+    if(e.code==='Space') { toggleRun(); e.preventDefault(); }
+    if(e.key==='t' || e.key==='T') applyInstantPower('fastball');
+  });
+  window.addEventListener('keyup', e => {
+    if(e.code==='ArrowLeft') keys.left = false;
+    if(e.code==='ArrowRight') keys.right = false;
+  });
+
+  btnRestart.addEventListener('click', () => resetGame());
+  btnNext.addEventListener('click', () => nextLevel());
+
+  function initBlocks(){
+    blocks = [];
+    const cfg = blockConfig;
+    for(let r=0;r<cfg.rows;r++){
+      for(let c=0;c<cfg.cols;c++){
+        const x = cfg.offsetLeft + c*(cfg.w + cfg.padding);
+        const y = cfg.offsetTop + r*(cfg.h + cfg.padding);
+        const strong = Math.random() < 0.15 ? 2 : 1; // some blocks need 2 hits
+        const color = ['#f94144','#f3722c','#f8961e','#f9c74f','#90be6d','#43aa8b'][r % 6];
+        blocks.push({x,y,w:cfg.w,h:cfg.h,alive:true,hp:strong,color});
+      }
+    }
+    updateBlocksLeft();
+  }
+
+  function updateBlocksLeft(){
+    blocksLeftEl.textContent = blocks.filter(b=>b.alive).length;
+  }
+
+  function resetGame(){
+    score = 0; lives = 3; level = 1; running=false;
+    paddle.w = 140; paddle.speed = 8;
+    ball = createBall();
+    powerUps = []; activePowers.length=0;
+    initBlocks();
+    updateHUD();
+  }
+
+  function nextLevel(){
+    level++;
+    ball = createBall();
+    // increase difficulty gradually
+    blockConfig.rows = Math.min(6, blockConfig.rows + 1);
+    initBlocks();
+    running = false;
+    updateHUD();
+  }
+
+  function updateHUD(){
+    scoreEl.textContent = score;
+    livesEl.textContent = lives;
+    levelEl.textContent = level;
+    updateBlocksLeft();
+    renderPowerList();
+  }
+
+  function toggleRun(){ running = !running; }
+
+  function applyInstantPower(type){
+    if(type==='expand') { paddle.w = Math.min(260, paddle.w + 60); schedulePower('expand', 10); }
+    if(type==='shrink') { paddle.w = Math.max(80, paddle.w - 40); schedulePower('shrink', 8); }
+    if(type==='multiball') { spawnExtraBalls(2); }
+    if(type==='fastball') { ball.vx*=1.6; ball.vy*=1.6; schedulePower('fastball', 8); }
+  }
+
+  function schedulePower(type, duration){
+    const expires = performance.now() + duration*1000;
+    activePowers.push({type,expires});
+    renderPowerList();
+  }
+
+  function renderPowerList(){
+    powerList.innerHTML = '';
+    if(activePowers.length===0){ powerList.innerHTML='<span class="power">Нет</span>'; return; }
+    activePowers.forEach(p=>{
+      const el = document.createElement('span'); el.className='power'; el.textContent = p.type + ' ('+Math.ceil((p.expires-performance.now())/1000)+'s)'; powerList.appendChild(el);
+    });
+  }
+
+  function spawnExtraBalls(n){
+    // simple implementation: give ball a temporary speed boost for scoring effect
+    for(let i=0;i<n;i++){
+      // small clone that won't be tracked separately for simplicity — we just reward points and change direction
+      ball.vx += (Math.random()*2-1)*2;
+      ball.vy *= 0.9;
+    }
+  }
+
+  function spawnPower(x,y){
+    // random power types
+    const types = ['expand','shrink','multiball','fastball'];
+    const type = types[Math.floor(Math.random()*types.length)];
+    powerUps.push({x:x, y:y, w:22, h:22, type, vy:2});
+  }
+
+  // Main loop
+  function loop(ts){
+    update((ts||0)/1000);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  let last = 0;
+  function update(dt){
+    // dt in seconds
+    if(!running) { updatePowerTimers(); return; }
+
+    // Paddle movement
+    if(keys.left) paddle.x -= paddle.speed;
+    if(keys.right) paddle.x += paddle.speed;
+    paddle.x = Math.max(6, Math.min(W - paddle.w - 6, paddle.x));
+
+    // Ball physics
+    ball.x += ball.vx * ball.speedMult;
+    ball.y += ball.vy * ball.speedMult;
+
+    // Wall collisions
+    if(ball.x - ball.r < 0){ ball.x = ball.r; ball.vx = -ball.vx; }
+    if(ball.x + ball.r > W){ ball.x = W - ball.r; ball.vx = -ball.vx; }
+    if(ball.y - ball.r < 0){ ball.y = ball.r; ball.vy = -ball.vy; }
+
+    // Paddle collision
+    if(ball.y + ball.r > paddle.y && ball.y + ball.r < paddle.y + paddle.h && ball.x > paddle.x && ball.x < paddle.x + paddle.w){
+      // reflect ball with angle depending on where it hits the paddle
+      const rel = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2); // -1..1
+      const angle = rel * (Math.PI/3); // -60..60 degrees
+      const speed = Math.min(10, Math.hypot(ball.vx, ball.vy) * 1.02);
+      ball.vx = speed * Math.sin(angle);
+      ball.vy = -Math.abs(speed * Math.cos(angle));
+      ball.y = paddle.y - ball.r - 0.1;
+      // slight audio effect
+    }
+
+    // Bottom (lose life)
+    if(ball.y - ball.r > H){
+      lives--;
+      if(lives<=0){
+        // game over — restart but keep level
+        running = false;
+        setTimeout(()=>{ alert('Игра окончена! Набрано очков: '+score); resetGame(); }, 50);
+      } else {
+        ball = createBall(); running = false;
+      }
+      updateHUD();
+    }
+
+    // Blocks collision
+    blocks.forEach(block => {
+      if(!block.alive) return;
+      if(circleRectCollision(ball, block)){
+        // basic response: invert y velocity and decrease hp
+        block.hp -= 1;
+        if(block.hp <= 0){ block.alive = false; score += 100; // chance to spawn power
+          if(Math.random() < 0.18) spawnPower(block.x + block.w/2, block.y + block.h/2);
+        } else { score += 40; }
+        ball.vy = -ball.vy;
+        updateHUD();
+      }
+    });
+
+    // Update powerups fall
+    for(let i=powerUps.length-1;i>=0;i--){
+      const p = powerUps[i]; p.y += p.vy;
+      // catch by paddle
+      if(p.y + p.h > paddle.y && p.x > paddle.x && p.x < paddle.x + paddle.w){
+        applyInstantPower(p.type); powerUps.splice(i,1);
+      } else if(p.y > H){ powerUps.splice(i,1); }
+    }
+
+    // Check level clear
+    if(blocks.every(b=>!b.alive)){
+      running=false; level++; initBlocks(); ball = createBall(); updateHUD();
+    }
+
+    updatePowerTimers();
+  }
+
+  function updatePowerTimers(){
+    const now = performance.now();
+    for(let i=activePowers.length-1;i>=0;i--){
+      const p = activePowers[i];
+      if(now > p.expires){
+        // remove effect
+        if(p.type==='expand') paddle.w = Math.max(100, paddle.w - 60);
+        if(p.type==='shrink') paddle.w = Math.min(140, paddle.w + 40);
+        if(p.type==='fastball') { /* we don't revert exact vx/vy, keep gameplay simple */ }
+        activePowers.splice(i,1);
+      }
+    }
+    renderPowerList();
+  }
+
+  // Helpers
+  function circleRectCollision(circle, rect){
+    // closest point
+    const cx = Math.max(rect.x, Math.min(circle.x, rect.x + rect.w));
+    const cy = Math.max(rect.y, Math.min(circle.y, rect.y + rect.h));
+    const dx = circle.x - cx; const dy = circle.y - cy;
+    return (dx*dx + dy*dy) < (circle.r * circle.r);
+  }
+
+  function draw(){
+    // clear
+    ctx.clearRect(0,0,W,H);
+
+    // background grid subtle
+    drawBackground();
+
+    // draw blocks
+    blocks.forEach(b => {
+      if(!b.alive) return;
+      roundRect(ctx, b.x, b.y, b.w, b.h, 6, true, false, b.color);
+      // hp overlay
+      if(b.hp>1){ ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fillRect(b.x, b.y, b.w*b.hp/2, b.h); }
+    });
+
+    // draw paddle
+    roundRect(ctx, paddle.x, paddle.y, paddle.w, paddle.h, 8, true, false, 'rgba(255,255,255,0.95)');
+
+    // draw ball
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fillStyle = '#ffd166'; ctx.fill();
+
+    // draw powerups
+    powerUps.forEach(p => {
+      roundRect(ctx, p.x - p.w/2, p.y - p.h/2, p.w, p.h, 6, true, false, '#90be6d');
+      ctx.fillStyle='#072'; ctx.font='11px monospace'; ctx.textAlign='center'; ctx.fillText(p.type[0].toUpperCase(), p.x, p.y+4);
+    });
+
+    // HUD overlay
+    ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.fillRect(8,8,210,36);
+    ctx.fillStyle='#fff'; ctx.font='14px Inter, sans-serif'; ctx.fillText('Очки: '+score, 16, 30);
+  }
+
+  function drawBackground(){
+    const step = 40;
+    ctx.save();
+    for(let x=0;x<W;x+=step){
+      for(let y=0;y<H;y+=step){
+        ctx.fillStyle = ( (x+y) % (step*2) === 0 ) ? 'rgba(255,255,255,0.008)' : 'rgba(255,255,255,0.004)';
+        ctx.fillRect(x, y, step, step);
+      }
+    }
+    ctx.restore();
+  }
+
+  function roundRect(ctx, x, y, w, h, r, fill=true, stroke=false, color){
+    ctx.beginPath(); ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r); ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
+    if(color) ctx.fillStyle = color;
+    if(fill) ctx.fill();
+    if(stroke) ctx.stroke();
+  }
+
+  // Start
+  initBlocks(); updateHUD();
+  requestAnimationFrame(loop);
+
+  // Start paused so user can prepare
+  running = false;
+
+})();
+</script>
+</body>
+</html>
